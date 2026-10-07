@@ -49,6 +49,7 @@ from flask import Blueprint, jsonify, request
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.auth import require_auth
 from pegaprox.api.helpers import check_cluster_access, load_metrics_window, scope_vm_rows, require_unconfined
+from pegaprox.utils.audit import log_audit
 from pegaprox.core.db import get_db
 from pegaprox.models.permissions import ROLE_ADMIN
 
@@ -142,12 +143,12 @@ def _host_profile(node, profiles, rates):
     return rates['node_idle_w'], max(rates['node_max_w'], rates['node_idle_w']), False
 
 
-def _intervals(snapshots):
-    """Hours each snapshot stands for: up to the next one, at most 3 usual steps,
-    so a gap (PegaProx down, collector stuck) counts as missing instead of bridged."""
+def _intervals(snapshots, step=300):
+    """Hours each snapshot stands for: up to the next one, at most 3 steps of the
+    cadence they were read at, so a gap (PegaProx down, collector stuck) counts as
+    missing instead of bridged. The cadence is the caller's, not taken from the
+    data: in a sparse history a long gap would be the typical step."""
     ts = [s[0] for s in snapshots]
-    steps = sorted(b - a for a, b in zip(ts, ts[1:]) if b > a)
-    step = steps[len(steps) // 2] if steps else 300
     cap = 3 * step
     out = [min(max(b - a, 0), cap) / 3600.0 for a, b in zip(ts, ts[1:])]
     if ts:
@@ -155,7 +156,7 @@ def _intervals(snapshots):
     return out
 
 
-def _compute_power(snapshots, resources, rates, profiles):
+def _compute_power(snapshots, resources, rates, profiles, step=300):
     """kWh per guest and per host over the snapshots; `resources` is the live guest list
     (names, and today's host for history from before #965).
 
@@ -174,7 +175,7 @@ def _compute_power(snapshots, resources, rates, profiles):
     # type, samples, running samples, running h, cpu % sum, mem % sum, vcpus, mem bytes,
     # {node: kwh}, samples without a recorded host, last host
     by_vm, hosts = {}, {}
-    dts = _intervals(snapshots)
+    dts = _intervals(snapshots, step)
 
     for (ts, cd), dt_h in zip(snapshots, dts):
         nodes = cd.get('nodes') or {}  # online hosts only
@@ -443,7 +444,9 @@ def _cached_power(cluster_id, days, snaps, rates, profiles):
     # the same manager too: a reconnected cluster gets a new one, with its own guests
     if hit and hit[0] == key and hit[1] is mgr and time.monotonic() - hit[2] < _RESULT_TTL:
         return hit[3]
-    res = _compute_power(snaps, resources, rates, profiles)
+    # the collector writes every 5 min, a long window reads every n-th row of it
+    from pegaprox.api.helpers import _history_stride
+    res = _compute_power(snaps, resources, rates, profiles, step=300 * _history_stride(days))
     now = time.monotonic()
     # held for the page's second request only, it carries a row per guest
     for k in [k for k, v in _results.items() if now - v[2] >= _RESULT_TTL]:
@@ -584,6 +587,10 @@ def list_host_profiles(cluster_id):
     """Every host of the cluster with the power profile it is costed with."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the profiles are whole-host settings; a confined caller sees their guests' share only
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'cluster not found'}), 404
     rates = _get_rates(cluster_id)
@@ -610,6 +617,11 @@ def list_host_profiles(cluster_id):
     return jsonify({'cluster_id': cluster_id,
                     'cluster_profile': {'idle_w': rates['node_idle_w'], 'max_w': rates['node_max_w']},
                     'hosts': hosts})
+
+
+def _cluster_name(cluster_id):
+    name = getattr(getattr(cluster_managers.get(cluster_id), 'config', None), 'name', None)
+    return name if isinstance(name, str) and name else cluster_id
 
 
 def _host_write_gate(cluster_id, node):
@@ -659,6 +671,9 @@ def upsert_host_profile(cluster_id, node):
                 updated_by=excluded.updated_by
         ''', (cluster_id, node, idle, mx, notes, datetime.now().isoformat(), _current_user()))
         get_db().conn.commit()
+        log_audit(_current_user(), 'power.host_profile_set',
+                  f'Power profile for host {node}: {idle:g} W idle, {mx:g} W full load',
+                  cluster=_cluster_name(cluster_id), cluster_id=cluster_id)
         return jsonify({'ok': True, 'node': node, 'idle_w': idle, 'max_w': mx, 'notes': notes})
     except Exception:
         logging.exception('upsert power host profile')
@@ -676,7 +691,12 @@ def delete_host_profile(cluster_id, node):
         c = get_db().conn.cursor()
         c.execute('DELETE FROM power_host_profiles WHERE cluster_id=? AND node=?', (cluster_id, node))
         get_db().conn.commit()
-        return jsonify({'ok': True, 'removed': c.rowcount > 0})
+        removed = c.rowcount > 0
+        if removed:
+            log_audit(_current_user(), 'power.host_profile_removed',
+                      f'Power profile for host {node} removed, it uses the cluster rates again',
+                      cluster=_cluster_name(cluster_id), cluster_id=cluster_id)
+        return jsonify({'ok': True, 'removed': removed})
     except Exception:
         logging.exception('delete power host profile')
         return jsonify({'error': 'internal error'}), 500

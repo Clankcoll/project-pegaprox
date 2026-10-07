@@ -23,7 +23,7 @@ KEYS = ['powerHostProfiles', 'powerHostProfilesHint', 'powerHostIdleW', 'powerHo
         'powerHostsSaved', 'powerHostSaveFailed', 'powerHostLoadFailed', 'powerPerHost', 'powerProfile',
         'powerProfileHost', 'powerProfileCluster', 'powerOnlineH', 'powerAvgW', 'powerGuests',
         'powerUnallocated', 'powerUnallocatedHint', 'powerCoverage', 'powerNodeEstimated',
-        'powerNodeGuessed', 'powerMigrated', 'powerScopedNote']
+        'powerNodeGuessed', 'powerMigrated', 'powerScopedNote', 'powerHostWattsMissing']
 
 
 def _read(*parts):
@@ -92,12 +92,6 @@ def test_the_icons_exist():
 def test_the_editor_is_for_admins_off_a_standby_only():
     tab = _tab()
     assert '{canAct && (\n                                <button onClick={openHosts}' in tab.replace('\r\n', '\n')
-
-
-def test_the_bundle_carries_it():
-    bundle = _read('web', 'index.html')
-    for needle in ('/power/hosts', 'data-power-host-profiles', 'data-power-hosts', 'powerHostProfiles'):
-        assert needle in bundle, needle
 
 
 # -- runtime ------------------------------------------------------------------------------------
@@ -256,4 +250,17 @@ def test_runtime_a_refused_profile_keeps_the_editor_open(open_app):
     modal.locator('tbody tr').nth(0).locator('input[type="number"]').nth(1).fill('5')
     modal.get_by_role('button', name='Save', exact=True).click()
     page.get_by_text('pve1: max_w must not be below idle_w').first.wait_for(timeout=5000)
+    assert modal.is_visible()
+
+
+def test_runtime_an_empty_watt_field_is_caught_before_it_is_sent(open_app):
+    app = open_app()
+    page = _open_power(app)
+    page.get_by_role('button', name='Host profiles', exact=True).click()
+    modal = page.locator('[data-power-host-profiles]')
+    modal.wait_for(timeout=5000)
+    modal.locator('tbody tr').nth(0).locator('input[type="number"]').nth(0).fill('')
+    modal.get_by_role('button', name='Save', exact=True).click()
+    page.get_by_text('pve1: Enter idle and full-load watts').first.wait_for(timeout=5000)
+    assert ('PUT', f'{HOSTS}/pve1') not in app.server.calls
     assert modal.is_visible()

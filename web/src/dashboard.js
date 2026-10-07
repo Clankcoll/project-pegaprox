@@ -4573,6 +4573,11 @@
                         if (h.own && h.wasOwn && h.was === `${parseFloat(h.idle)}|${parseFloat(h.max)}|${h.notes || ''}`) {
                             continue;  // unchanged - keep who set it and when
                         } else if (h.own) {
+                            if (!Number.isFinite(parseFloat(h.idle)) || !Number.isFinite(parseFloat(h.max))) {
+                                failed++;
+                                addToast(`${h.node}: ${t('powerHostWattsMissing') || 'Enter idle and full-load watts'}`, 'error');
+                                continue;
+                            }
                             r = await authFetch(`${API_URL}/clusters/${clusterId}/power/hosts/${encodeURIComponent(h.node)}`, {
                                 method: 'PUT',
                                 headers: { 'Content-Type': 'application/json' },
@@ -5048,21 +5053,21 @@
                                                     </div>
                                                 </td>
                                                 <td>
-                                                    <input type="checkbox" checked={h.own} disabled={!h.in_cluster && !h.own}
+                                                    <input type="checkbox" checked={h.own} disabled={savingHosts || (!h.in_cluster && !h.own)}
                                                         onChange={e => setHost(h.node, { own: e.target.checked })} />
                                                 </td>
                                                 <td className="pr-2">
-                                                    <input type="number" min="0" step="1" value={h.idle} disabled={!h.own}
+                                                    <input type="number" min="0" step="1" value={h.idle} disabled={savingHosts || !h.own || !h.in_cluster}
                                                         onChange={e => setHost(h.node, { idle: e.target.value })}
                                                         className="w-20 px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm disabled:opacity-50" />
                                                 </td>
                                                 <td className="pr-2">
-                                                    <input type="number" min="0" step="1" value={h.max} disabled={!h.own}
+                                                    <input type="number" min="0" step="1" value={h.max} disabled={savingHosts || !h.own || !h.in_cluster}
                                                         onChange={e => setHost(h.node, { max: e.target.value })}
                                                         className="w-20 px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm disabled:opacity-50" />
                                                 </td>
                                                 <td>
-                                                    <input type="text" maxLength={500} value={h.notes || ''} disabled={!h.own}
+                                                    <input type="text" maxLength={500} value={h.notes || ''} disabled={savingHosts || !h.own || !h.in_cluster}
                                                         onChange={e => setHost(h.node, { notes: e.target.value })}
                                                         className="w-full px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm disabled:opacity-50" />
                                                 </td>
